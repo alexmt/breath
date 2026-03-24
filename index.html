@@ -213,19 +213,41 @@ document.getElementById('start-btn').addEventListener('click', async () => {
   document.getElementById('start-screen').style.display = 'none';
   document.getElementById('app').style.display = 'block';
 
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = CFG.fftSize;
-  analyser.smoothingTimeConstant = CFG.smoothingTimeConstant;
-  audioCtx.createMediaStreamSource(stream).connect(analyser);
+  try {
+    // Must create + resume AudioContext synchronously inside the gesture handler.
+    // iOS (all browsers) suspends AudioContext by default and won't allow resume after an await.
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const resumePromise = audioCtx.resume();
 
-  freqData = new Float32Array(analyser.frequencyBinCount);
-  timeData = new Float32Array(analyser.fftSize);
+    // Explicit constraints improve compatibility with Chrome on iOS
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl:  false,
+      },
+      video: false,
+    });
+    await resumePromise;
 
-  await calibrate();
-  document.getElementById('calibration').style.display = 'none';
-  loop();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = CFG.fftSize;
+    analyser.smoothingTimeConstant = CFG.smoothingTimeConstant;
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+
+    freqData = new Float32Array(analyser.frequencyBinCount);
+    timeData = new Float32Array(analyser.fftSize);
+
+    await calibrate();
+    document.getElementById('calibration').style.display = 'none';
+    loop();
+  } catch (err) {
+    document.getElementById('calibration').innerHTML =
+      `<p style="color:#e06060;max-width:260px;text-align:center;line-height:1.7">
+        Could not access microphone.<br>
+        <span style="font-size:0.75em;color:#555">${err.name}: ${err.message}</span>
+      </p>`;
+  }
 });
 
 // ─── Calibration ───────────────────────────────────────────────────────────
