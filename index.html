@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Breath Work</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #080810;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    #start-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+    }
+
+    #start-screen h1 {
+      font-size: 2rem;
+      font-weight: 300;
+      letter-spacing: 0.25em;
+      color: #a0c4ff;
+    }
+
+    #start-screen p {
+      font-size: 0.85rem;
+      color: #555;
+      max-width: 280px;
+      text-align: center;
+      line-height: 1.7;
+    }
+
+    #start-btn {
+      background: none;
+      border: 1px solid #a0c4ff33;
+      color: #a0c4ffaa;
+      padding: 11px 40px;
+      font-size: 0.8rem;
+      letter-spacing: 0.2em;
+      cursor: pointer;
+      border-radius: 2px;
+      transition: all 0.3s;
+    }
+    #start-btn:hover {
+      background: #a0c4ff0d;
+      border-color: #a0c4ff66;
+      color: #a0c4ff;
+    }
+
+    #app {
+      display: none;
+      position: fixed;
+      inset: 0;
+    }
+
+    #calibration {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      background: #080810;
+      z-index: 10;
+    }
+    #calibration p { color: #444; font-size: 0.8rem; letter-spacing: 0.15em; }
+    #cal-bar-wrap {
+      width: 180px; height: 2px;
+      background: #1a1a2a; border-radius: 2px; overflow: hidden;
+    }
+    #cal-bar { height: 100%; width: 0%; background: #a0c4ff; transition: width 0.1s linear; }
+
+    #main-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+    #phase-label {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.68rem;
+      letter-spacing: 0.35em;
+      text-transform: uppercase;
+      transition: color 0.5s, opacity 0.5s;
+      pointer-events: none;
+    }
+
+    #debug-toggle {
+      position: fixed; bottom: 10px; right: 12px;
+      background: none; border: none; color: #222;
+      font-size: 0.65rem; cursor: pointer; letter-spacing: 0.1em; z-index: 20;
+    }
+    #debug-panel {
+      display: none;
+      position: fixed; bottom: 32px; right: 12px;
+      background: #0d0d1a; border: 1px solid #1a1a2a;
+      padding: 10px 14px; font-size: 0.65rem; color: #555;
+      line-height: 2; font-family: monospace; z-index: 20;
+    }
+  </style>
+</head>
+<body>
+
+<div id="start-screen">
+  <h1>breath work</h1>
+  <p>Breathe naturally. The mandala responds to your breath.</p>
+  <button id="start-btn">BEGIN</button>
+</div>
+
+<div id="app">
+  <div id="calibration">
+    <p>CALIBRATING — stay quiet</p>
+    <div id="cal-bar-wrap"><div id="cal-bar"></div></div>
+  </div>
+  <canvas id="main-canvas"></canvas>
+  <div id="phase-label">—</div>
+</div>
+
+<button id="debug-toggle">debug</button>
+<div id="debug-panel">
+  <div>rms: <span id="d-rms">0</span></div>
+  <div>ratio: <span id="d-ratio">0</span></div>
+  <div>intensity: <span id="d-intensity">0</span></div>
+  <div>phase: <span id="d-phase">—</span></div>
+  <div>noise floor: <span id="d-noise">0</span></div>
+</div>
+
+<script>
+// ─── Config ────────────────────────────────────────────────────────────────
+const CFG = {
+  fftSize: 2048,
+  smoothingTimeConstant: 0.8,
+  calibrationMs: 2000,
+  smoothAlpha: 0.28,
+  silenceMultiplier: 1.8,
+  inhaleRatioThresh: 0.52,
+  exhaleRatioThresh: 0.44,
+  lowBandHz:  [100, 800],
+  highBandHz: [800, 4000],
+};
+
+// ─── Color Palettes ────────────────────────────────────────────────────────
+const PAL = {
+  inhale: {
+    outer:  [20,  184, 166],   // teal
+    mid:    [99,  179, 237],   // sky blue
+    inner:  [167, 139, 250],   // violet
+    accent: [234, 179,   8],   // gold
+    dot:    [255, 236, 153],   // cream
+    glow:   [20,  184, 166],
+  },
+  exhale: {
+    outer:  [249, 115,  22],   // orange
+    mid:    [251, 191,  36],   // amber
+    inner:  [244, 114, 182],   // rose
+    accent: [234, 179,   8],   // gold
+    dot:    [255, 236, 153],   // cream
+    glow:   [249, 115,  22],
+  },
+};
+
+function lerpRGB(a, b, t) {
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+  ];
+}
+
+function rgba(c, a) { return `rgba(${c[0]},${c[1]},${c[2]},${a.toFixed(3)})`; }
+
+function getColors(t) {
+  const l = (k) => lerpRGB(PAL.exhale[k], PAL.inhale[k], t);
+  return { outer: l('outer'), mid: l('mid'), inner: l('inner'),
+           accent: PAL.inhale.accent, dot: PAL.inhale.dot, glow: l('glow') };
+}
+
+// ─── Audio State ───────────────────────────────────────────────────────────
+let audioCtx, analyser, freqData, timeData;
+let noiseFloor = 0;
+let smoothRms  = 0;
+let smoothRatio = 0;
+let phase = 'silence';
+let intensity = 0;
+
+// ─── Mandala Anim State ────────────────────────────────────────────────────
+let mandalaScale = 0.8;
+let colorT   = 0.5;
+let rotation = 0;
+
+// ─── Timeline ──────────────────────────────────────────────────────────────
+const TIMELINE_LEN = 500;
+const timeline = [];
+
+// ─── DOM ───────────────────────────────────────────────────────────────────
+const canvas     = document.getElementById('main-canvas');
+const ctx        = canvas.getContext('2d');
+const phaseLabel = document.getElementById('phase-label');
+const debugPanel = document.getElementById('debug-panel');
+
+// ─── Start ─────────────────────────────────────────────────────────────────
+document.getElementById('start-btn').addEventListener('click', async () => {
+  document.getElementById('start-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = CFG.fftSize;
+  analyser.smoothingTimeConstant = CFG.smoothingTimeConstant;
+  audioCtx.createMediaStreamSource(stream).connect(analyser);
+
+  freqData = new Float32Array(analyser.frequencyBinCount);
+  timeData = new Float32Array(analyser.fftSize);
+
+  await calibrate();
+  document.getElementById('calibration').style.display = 'none';
+  loop();
+});
+
+// ─── Calibration ───────────────────────────────────────────────────────────
+async function calibrate() {
+  const calBar = document.getElementById('cal-bar');
+  const samples = [];
+  const start = performance.now();
+  return new Promise(resolve => {
+    function tick() {
+      const elapsed = performance.now() - start;
+      calBar.style.width = Math.min(100, (elapsed / CFG.calibrationMs) * 100) + '%';
+      analyser.getFloatTimeDomainData(timeData);
+      samples.push(rmsOf(timeData));
+      if (elapsed < CFG.calibrationMs) {
+        requestAnimationFrame(tick);
+      } else {
+        samples.sort((a, b) => a - b);
+        noiseFloor = samples[Math.floor(samples.length * 0.9)];
+        resolve();
+      }
+    }
+    requestAnimationFrame(tick);
+  });
+}
+
+// ─── Audio Helpers ─────────────────────────────────────────────────────────
+function rmsOf(buf) {
+  let s = 0;
+  for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+  return Math.sqrt(s / buf.length);
+}
+
+function hzToIndex(hz) {
+  return Math.round(hz / (audioCtx.sampleRate / CFG.fftSize));
+}
+
+function bandEnergy(lo, hi) {
+  const a = hzToIndex(lo), b = Math.min(hzToIndex(hi), freqData.length - 1);
+  let s = 0;
+  for (let i = a; i <= b; i++) { const v = Math.pow(10, freqData[i] / 20); s += v * v; }
+  return s / (b - a + 1);
+}
+
+function ema(prev, next, alpha) { return alpha * next + (1 - alpha) * prev; }
+
+// ─── Main Loop ─────────────────────────────────────────────────────────────
+function loop() {
+  analyser.getFloatTimeDomainData(timeData);
+  analyser.getFloatFrequencyData(freqData);
+
+  const rawRms = rmsOf(timeData);
+  smoothRms    = ema(smoothRms, rawRms, CFG.smoothAlpha);
+
+  const lowE   = bandEnergy(...CFG.lowBandHz);
+  const highE  = bandEnergy(...CFG.highBandHz);
+  const ratio  = highE / (lowE + highE + 1e-10);
+  smoothRatio  = ema(smoothRatio, ratio, CFG.smoothAlpha);
+
+  const isSilent = smoothRms < noiseFloor * CFG.silenceMultiplier;
+  if (isSilent) {
+    phase = 'silence';
+    intensity = 0;
+  } else {
+    if (smoothRatio > CFG.inhaleRatioThresh)      phase = 'inhale';
+    else if (smoothRatio < CFG.exhaleRatioThresh) phase = 'exhale';
+    const lo = noiseFloor * 2, hi = noiseFloor * 14;
+    intensity = Math.min(1, Math.max(0, (smoothRms - lo) / (hi - lo)));
+  }
+
+  timeline.push({ phase, intensity });
+  if (timeline.length > TIMELINE_LEN) timeline.shift();
+
+  updateLabel();
+  resizeCanvas();
+  render();
+  updateDebug(rawRms, ratio);
+
+  requestAnimationFrame(loop);
+}
+
+// ─── Label ─────────────────────────────────────────────────────────────────
+function updateLabel() {
+  if (phase === 'inhale') {
+    phaseLabel.textContent = 'inhale';
+    phaseLabel.style.color = '#a0c4ff';
+    phaseLabel.style.opacity = '0.55';
+  } else if (phase === 'exhale') {
+    phaseLabel.textContent = 'exhale';
+    phaseLabel.style.color = '#ffb347';
+    phaseLabel.style.opacity = '0.55';
+  } else {
+    phaseLabel.textContent = '—';
+    phaseLabel.style.color = '#444';
+    phaseLabel.style.opacity = '0.35';
+  }
+}
+
+// ─── Resize ────────────────────────────────────────────────────────────────
+let dpr = 1;
+function resizeCanvas() {
+  dpr = window.devicePixelRatio || 1;
+  const W = window.innerWidth, H = window.innerHeight;
+  if (canvas.width !== W * dpr || canvas.height !== H * dpr) {
+    canvas.width  = W * dpr;  canvas.height  = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.scale(dpr, dpr);
+  }
+}
+
+// ─── Render ────────────────────────────────────────────────────────────────
+function render() {
+  const W = window.innerWidth;
+  const H = window.innerHeight;
+  const TL_H = 72;
+  const cx = W / 2;
+  const cy = (H - TL_H) / 2;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Update mandala anim state
+  const now = performance.now() / 1000;
+  const idlePulse = Math.sin(now * 0.75) * 0.03;
+  rotation = (rotation + 0.00035) % (Math.PI * 2);
+
+  let targetScale, targetColorT;
+  if (phase === 'inhale') {
+    targetScale  = 0.87 + intensity * 0.13;
+    targetColorT = 1.0;
+  } else if (phase === 'exhale') {
+    targetScale  = 0.70 + intensity * 0.14;
+    targetColorT = 0.0;
+  } else {
+    targetScale  = 0.78 + idlePulse;
+    targetColorT = 0.5;
+  }
+
+  mandalaScale += (targetScale  - mandalaScale) * 0.12;
+  colorT       += (targetColorT - colorT)       * 0.09;
+
+  const R      = Math.min(W, H - TL_H) * 0.41 * mandalaScale;
+  const colors = getColors(colorT);
+
+  // Position phase label just below the mandala
+  phaseLabel.style.top = (cy + R * 1.14) + 'px';
+
+  drawMandala(cx, cy, R, colors);
+  drawTimeline(0, H - TL_H, W, TL_H);
+}
+
+// ─── Mandala ───────────────────────────────────────────────────────────────
+function drawMandala(cx, cy, R, c) {
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Ambient glow (unrotated so it stays stable)
+  const glowR = R * 1.7;
+  const grd = ctx.createRadialGradient(0, 0, R * 0.15, 0, 0, glowR);
+  grd.addColorStop(0,   rgba(c.glow, 0.13 + intensity * 0.10));
+  grd.addColorStop(0.45, rgba(c.glow, 0.05));
+  grd.addColorStop(1,   rgba(c.glow, 0));
+  ctx.beginPath();
+  ctx.arc(0, 0, glowR, 0, Math.PI * 2);
+  ctx.fillStyle = grd;
+  ctx.fill();
+
+  ctx.rotate(rotation);
+
+  // ── Outer dot ring (16 dots) ──────────────────────────────────────────
+  dotRing(R * 0.97, 16, R * 0.022, c.dot, 0.65);
+
+  // ── Outer petal ring (8 large petals) ────────────────────────────────
+  petalRing(8, R * 0.57, R * 0.375, R * 0.130, 0,            c.outer, c.accent, 0.78);
+  // Decorative inner highlight on outer petals (narrower, shorter)
+  petalRing(8, R * 0.57, R * 0.310, R * 0.055, 0,            c.accent, c.accent, 0.40);
+
+  // ── Middle dot ring ───────────────────────────────────────────────────
+  dotRing(R * 0.60, 8, R * 0.015, c.dot, 0.50);
+
+  // ── Middle petal ring (8 petals, offset 22.5°) ───────────────────────
+  petalRing(8, R * 0.385, R * 0.220, R * 0.090, Math.PI / 8, c.mid,   c.accent, 0.82);
+
+  // ── Separator ring ────────────────────────────────────────────────────
+  ring(R * 0.205, R * 0.005, c.accent, 0.55);
+
+  // ── Inner petal ring (8 small pointed petals) ────────────────────────
+  petalRing(8, R * 0.200, R * 0.095, R * 0.052, 0,            c.inner, c.accent, 0.88);
+
+  // ── Center dot rings ──────────────────────────────────────────────────
+  ring(R * 0.155, R * 0.004, c.accent, 0.45);
+  dotRing(R * 0.140, 12, R * 0.014, c.dot,   0.60);
+  dotRing(R * 0.092, 8,  R * 0.012, c.dot,   0.65);
+  dotRing(R * 0.052, 6,  R * 0.010, c.accent, 0.70);
+
+  // ── Center gold ring + dot ────────────────────────────────────────────
+  ring(R * 0.034, R * 0.007, c.accent, 0.85);
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.024, 0, Math.PI * 2);
+  ctx.fillStyle = rgba(c.accent, 0.95);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// Draw a single petal shape pointing upward from origin (base at origin, tip at -length)
+function petalShape(length, width) {
+  ctx.beginPath();
+  ctx.moveTo(0, -length);
+  ctx.bezierCurveTo( width * 0.85, -length * 0.65,  width * 0.90, -length * 0.17, 0, 0);
+  ctx.bezierCurveTo(-width * 0.90, -length * 0.17, -width * 0.85, -length * 0.65, 0, -length);
+  ctx.closePath();
+}
+
+// n petals, base of each petal at radius r from center, petal extends outward petalLen, half-width petalW
+function petalRing(n, r, petalLen, petalW, angleOffset, fillColor, strokeColor, alpha) {
+  for (let i = 0; i < n; i++) {
+    const angle = (i / n) * Math.PI * 2 + angleOffset;
+    ctx.save();
+    ctx.rotate(angle);
+    ctx.translate(0, -r);
+    ctx.fillStyle   = rgba(fillColor,   alpha);
+    ctx.strokeStyle = rgba(strokeColor, alpha * 0.45);
+    ctx.lineWidth   = 0.7;
+    petalShape(petalLen, petalW);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function dotRing(r, n, dotR, color, alpha) {
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+    ctx.beginPath();
+    ctx.arc(Math.cos(a) * r, Math.sin(a) * r, dotR, 0, Math.PI * 2);
+    ctx.fillStyle = rgba(color, alpha);
+    ctx.fill();
+  }
+}
+
+function ring(r, lineWidth, color, alpha) {
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.strokeStyle = rgba(color, alpha);
+  ctx.lineWidth   = lineWidth;
+  ctx.stroke();
+}
+
+// ─── Timeline ──────────────────────────────────────────────────────────────
+function drawTimeline(x, y, W, H) {
+  const barW = W / TIMELINE_LEN;
+  for (let i = 0; i < timeline.length; i++) {
+    const { phase: p, intensity: v } = timeline[i];
+    let r, g, b;
+    if      (p === 'inhale')  { r = 160; g = 196; b = 255; }
+    else if (p === 'exhale')  { r = 255; g = 179; b = 71;  }
+    else                      { r = 40;  g = 40;  b = 60;  }
+    const alpha = p === 'silence' ? 0.10 : 0.15 + v * 0.78;
+    const barH  = p === 'silence' ? 2    : 3 + v * (H - 7);
+    ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.fillRect(x + i * barW, y + H - barH, Math.max(1, barW - 0.5), barH);
+  }
+  ctx.strokeStyle = '#ffffff05';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + W, y); ctx.stroke();
+}
+
+// ─── Debug ─────────────────────────────────────────────────────────────────
+document.getElementById('debug-toggle').addEventListener('click', () => {
+  debugPanel.style.display = debugPanel.style.display === 'none' ? 'block' : 'none';
+});
+function updateDebug(rawRms, ratio) {
+  if (debugPanel.style.display === 'none') return;
+  document.getElementById('d-rms').textContent       = rawRms.toFixed(5);
+  document.getElementById('d-ratio').textContent     = smoothRatio.toFixed(3);
+  document.getElementById('d-intensity').textContent = intensity.toFixed(3);
+  document.getElementById('d-phase').textContent     = phase;
+  document.getElementById('d-noise').textContent     = noiseFloor.toFixed(5);
+}
+</script>
+</body>
+</html>
